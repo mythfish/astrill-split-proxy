@@ -132,6 +132,137 @@ fn bool_from_config(config: &Value, key: &str, fallback: bool) -> bool {
     config.get(key).and_then(Value::as_bool).unwrap_or(fallback)
 }
 
+fn running_proxy_pids() -> Result<Vec<u32>, String> {
+    let config = config_path()?.to_string_lossy().to_string();
+    let pids = command_output(
+        "/usr/bin/pgrep",
+        &["-f", "astrill_split_proxy.py"],
+        Duration::from_secs(2),
+    )
+    .unwrap_or_default();
+    let mut result = Vec::new();
+    for pid in pids.lines().map(str::trim).filter(|pid| !pid.is_empty()) {
+        let Ok(line) = command_output(
+            "/bin/ps",
+            &["-p", pid, "-o", "command="],
+            Duration::from_secs(2),
+        ) else {
+            continue;
+        };
+        if line.contains("astrill_split_proxy.py") && line.contains(&config) {
+            if let Ok(pid) = pid.parse::<u32>() {
+                result.push(pid);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn kill_running_proxy_pids() -> Result<(), String> {
+    for pid in running_proxy_pids()? {
+        let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+    }
+    Ok(())
+}
+
+fn bundled_proxy_script_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let contents = exe
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| "cannot resolve app bundle path".to_string())?;
+    let bundled = contents
+        .join("Resources")
+        .join("resources")
+        .join("astrill_split_proxy.py");
+    if bundled.exists() {
+        return Ok(bundled);
+    }
+
+    let dev = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join("src-tauri")
+        .join("resources")
+        .join("astrill_split_proxy.py");
+    if dev.exists() {
+        return Ok(dev);
+    }
+
+    Err(format!(
+        "proxy worker not found at {}",
+        bundled.to_string_lossy()
+    ))
+}
+
+fn local_port_open(port: u16) -> bool {
+    let Ok(addr) = format!("127.0.0.1:{port}").parse() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+fn wait_for_proxy_ports(http_port: u16, socks_port: u16, timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if local_port_open(http_port) && local_port_open(socks_port) {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn self_test_start_stop() -> Result<String, String> {
+    if !running_proxy_pids()?.is_empty() {
+        return Err("proxy worker is already running".into());
+    }
+
+    let config_path = config_path()?;
+    let config_data = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+    let config: Value = serde_json::from_str(&config_data).map_err(|e| e.to_string())?;
+    let http_port = port_from_config(&config, "listen", "http_port", 18080);
+    let socks_port = port_from_config(&config, "listen", "socks_port", 18081);
+    if local_port_open(http_port) || local_port_open(socks_port) {
+        return Err(format!(
+            "port already open before start: http={http_port} socks={socks_port}"
+        ));
+    }
+
+    let script = bundled_proxy_script_path()?;
+    let mut child = Command::new("/usr/bin/python3")
+        .arg(&script)
+        .arg("-c")
+        .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let started = wait_for_proxy_ports(http_port, socks_port, Duration::from_secs(5));
+    let _ = child.kill();
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !started {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "proxy worker did not open ports".into()
+        } else {
+            format!("proxy worker did not open ports: {stderr}")
+        });
+    }
+
+    thread::sleep(Duration::from_millis(300));
+    if local_port_open(http_port) || local_port_open(socks_port) {
+        return Err("proxy ports stayed open after stop".into());
+    }
+
+    Ok(format!(
+        "start_stop=ok script={} http_port={http_port} socks_port={socks_port}",
+        script.to_string_lossy()
+    ))
+}
+
 fn push_log(app: &AppHandle, state: &State<Arc<AppState>>, message: impl Into<String>) {
     let message = message.into();
     if let Ok(mut logs) = state.logs.lock() {
@@ -452,10 +583,10 @@ async fn get_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<S
                 Ok(None) => true,
                 Ok(Some(_)) | Err(_) => {
                     *child = None;
-                    false
+                    !running_proxy_pids()?.is_empty()
                 }
             },
-            None => false,
+            None => !running_proxy_pids()?.is_empty(),
         }
     };
     Ok(Status {
@@ -507,6 +638,14 @@ async fn start_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<
             }
         }
     }
+    if !running_proxy_pids()?.is_empty() {
+        push_log(&app, &state, "Proxy is already running.");
+        if auto_system_proxy {
+            apply_system_proxy("Wi-Fi", http_port, socks_port, true);
+            push_log(&app, &state, "System proxy enabled automatically.");
+        }
+        return Ok(());
+    }
     let script = app
         .path()
         .resolve(
@@ -552,6 +691,7 @@ async fn stop_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(
         let _ = child.wait();
     }
     *guard = None;
+    kill_running_proxy_pids()?;
     push_log(&app, &state, "Proxy stopped.");
     Ok(())
 }
@@ -1024,6 +1164,30 @@ fn main() {
             }
             Err(error) => {
                 eprintln!("login_plist_lint_error={error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.iter().any(|arg| arg == "--self-test-proxy-pids") {
+        match running_proxy_pids() {
+            Ok(pids) => {
+                println!("proxy_pids={pids:?}");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("proxy_pids_error={error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.iter().any(|arg| arg == "--self-test-start-stop") {
+        match self_test_start_stop() {
+            Ok(message) => {
+                println!("{message}");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("start_stop_error={error}");
                 std::process::exit(1);
             }
         }
