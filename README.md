@@ -10,6 +10,7 @@ It is built with Tauri, React, Ant Design, Rust, and a Python proxy worker.
 - Start a local HTTP proxy and SOCKS5 proxy.
 - Route traffic by domain rules through either direct or proxy paths.
 - Toggle macOS system proxy settings for Wi-Fi.
+- Optionally enable the macOS system proxy automatically after the local proxy starts.
 - Write shell proxy config for zsh, bash, and fish.
 - Monitor recent traffic and see which hosts used the proxy route.
 - Keep running from the macOS menu bar after closing the window.
@@ -68,6 +69,8 @@ codesign --verify --deep --strict --verbose=2 "src-tauri/target/release/bundle/m
 3. Click `检测` to detect the OpenWeb port.
 4. Click `启动` to start the local split proxy.
 5. Use the system proxy buttons, shell proxy buttons, or configure a browser/app to use `127.0.0.1:18080` / `127.0.0.1:18081`.
+
+The `启动代理后自动开启系统代理` option can be enabled before starting the proxy. When enabled, starting the local proxy also turns on the macOS Wi-Fi system proxy.
 
 ## Application Proxy
 

@@ -42,6 +42,7 @@ struct SaveRequest {
     socks_port: u16,
     upstream_port: u16,
     default_route: String,
+    auto_system_proxy: bool,
     proxy_rules: Vec<String>,
     direct_rules: Vec<String>,
 }
@@ -84,7 +85,10 @@ fn ensure_config(app: &AppHandle) -> Result<(), String> {
     if !path.exists() {
         let default_path = app
             .path()
-            .resolve("resources/default_config.json", tauri::path::BaseDirectory::Resource)
+            .resolve(
+                "resources/default_config.json",
+                tauri::path::BaseDirectory::Resource,
+            )
             .map_err(|e| e.to_string())?;
         fs::copy(default_path, path).map_err(|e| e.to_string())?;
     }
@@ -122,6 +126,10 @@ fn port_from_config(config: &Value, group: &str, key: &str, fallback: u16) -> u1
         .and_then(|v| v.as_u64())
         .map(|v| v as u16)
         .unwrap_or(fallback)
+}
+
+fn bool_from_config(config: &Value, key: &str, fallback: bool) -> bool {
+    config.get(key).and_then(Value::as_bool).unwrap_or(fallback)
 }
 
 fn push_log(app: &AppHandle, state: &State<Arc<AppState>>, message: impl Into<String>) {
@@ -198,7 +206,8 @@ fn app_executable(path: &str) -> Result<PathBuf, String> {
             "raw",
             "-o",
             "-",
-            info.to_str().ok_or_else(|| "invalid app path".to_string())?,
+            info.to_str()
+                .ok_or_else(|| "invalid app path".to_string())?,
         ],
         Duration::from_secs(3),
     )
@@ -268,7 +277,11 @@ fn detect_astrill_port_sync() -> Result<Option<u16>, String> {
     let pids = command_output("/usr/bin/pgrep", &["-x", "openweb"], Duration::from_secs(2))
         .unwrap_or_default();
     for pid in pids.lines().map(str::trim).filter(|pid| !pid.is_empty()) {
-        let line = command_output("/bin/ps", &["-p", pid, "-o", "command="], Duration::from_secs(2))?;
+        let line = command_output(
+            "/bin/ps",
+            &["-p", pid, "-o", "command="],
+            Duration::from_secs(2),
+        )?;
         let parts: Vec<&str> = line.split_whitespace().collect();
         for index in 0..parts.len().saturating_sub(1) {
             if parts[index] == "--proxy-port" {
@@ -360,6 +373,41 @@ export NO_PROXY="$no_proxy"
     }
 }
 
+fn apply_system_proxy(service: &str, http_port: u16, socks_port: u16, enabled: bool) {
+    let http_port = http_port.to_string();
+    let socks_port = socks_port.to_string();
+    if enabled {
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setwebproxy", service, "127.0.0.1", &http_port])
+            .status();
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setsecurewebproxy", service, "127.0.0.1", &http_port])
+            .status();
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setsocksfirewallproxy", service, "127.0.0.1", &socks_port])
+            .status();
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setwebproxystate", service, "on"])
+            .status();
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setsecurewebproxystate", service, "on"])
+            .status();
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setsocksfirewallproxystate", service, "on"])
+            .status();
+    } else {
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setwebproxystate", service, "off"])
+            .status();
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setsecurewebproxystate", service, "off"])
+            .status();
+        let _ = Command::new("/usr/sbin/networksetup")
+            .args(["-setsocksfirewallproxystate", service, "off"])
+            .status();
+    }
+}
+
 #[tauri::command]
 async fn load_config(app: AppHandle) -> Result<Value, String> {
     read_config_value(&app)
@@ -380,6 +428,7 @@ async fn save_config(app: AppHandle, req: SaveRequest) -> Result<(), String> {
             "port": req.upstream_port
         },
         "default_route": req.default_route,
+        "auto_system_proxy": req.auto_system_proxy,
         "rules": {
             "proxy": req.proxy_rules,
             "direct": req.direct_rules
@@ -420,13 +469,20 @@ async fn get_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<S
 }
 
 #[tauri::command]
-async fn detect_astrill_port(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<Option<u16>, String> {
+async fn detect_astrill_port(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<u16>, String> {
     push_log(&app, &state, "Detecting Astrill OpenWeb port...");
     let port = tauri::async_runtime::spawn_blocking(detect_astrill_port_sync)
         .await
         .map_err(|e| e.to_string())??;
     if let Some(port) = port {
-        push_log(&app, &state, format!("Detected Astrill OpenWeb port: {port}"));
+        push_log(
+            &app,
+            &state,
+            format!("Detected Astrill OpenWeb port: {port}"),
+        );
     } else {
         push_log(&app, &state, "Astrill OpenWeb process was not found.");
     }
@@ -435,6 +491,10 @@ async fn detect_astrill_port(app: AppHandle, state: State<'_, Arc<AppState>>) ->
 
 #[tauri::command]
 async fn start_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let config_value = read_config_value(&app)?;
+    let http_port = port_from_config(&config_value, "listen", "http_port", 18080);
+    let socks_port = port_from_config(&config_value, "listen", "socks_port", 18081);
+    let auto_system_proxy = bool_from_config(&config_value, "auto_system_proxy", false);
     let mut guard = state.proxy.lock().map_err(|e| e.to_string())?;
     if let Some(process) = guard.as_mut() {
         match process.try_wait() {
@@ -449,7 +509,10 @@ async fn start_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<
     }
     let script = app
         .path()
-        .resolve("resources/astrill_split_proxy.py", tauri::path::BaseDirectory::Resource)
+        .resolve(
+            "resources/astrill_split_proxy.py",
+            tauri::path::BaseDirectory::Resource,
+        )
         .map_err(|e| e.to_string())?;
     let config = config_path()?;
     let mut child = Command::new("/usr/bin/python3")
@@ -472,7 +535,12 @@ async fn start_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<
         });
     }
     *guard = Some(child);
+    drop(guard);
     push_log(&app, &state, "Proxy started.");
+    if auto_system_proxy {
+        apply_system_proxy("Wi-Fi", http_port, socks_port, true);
+        push_log(&app, &state, "System proxy enabled automatically.");
+    }
     Ok(())
 }
 
@@ -522,35 +590,38 @@ async fn test_country(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result
     })
     .await
     .map_err(|e| e.to_string())?;
-    push_log(&app, &state, format!("Country test: direct={direct}, proxy={proxy}"));
+    push_log(
+        &app,
+        &state,
+        format!("Country test: direct={direct}, proxy={proxy}"),
+    );
     Ok(json!({ "direct": direct, "proxy": proxy }))
 }
 
 #[tauri::command]
-async fn set_system_proxy(app: AppHandle, state: State<'_, Arc<AppState>>, enabled: bool) -> Result<(), String> {
+async fn set_system_proxy(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
     let config = read_config_value(&app)?;
-    let http_port = port_from_config(&config, "listen", "http_port", 18080).to_string();
-    let socks_port = port_from_config(&config, "listen", "socks_port", 18081).to_string();
-    let service = "Wi-Fi";
+    let http_port = port_from_config(&config, "listen", "http_port", 18080);
+    let socks_port = port_from_config(&config, "listen", "socks_port", 18081);
+    apply_system_proxy("Wi-Fi", http_port, socks_port, enabled);
     if enabled {
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setwebproxy", service, "127.0.0.1", &http_port]).status();
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setsecurewebproxy", service, "127.0.0.1", &http_port]).status();
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setsocksfirewallproxy", service, "127.0.0.1", &socks_port]).status();
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setwebproxystate", service, "on"]).status();
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setsecurewebproxystate", service, "on"]).status();
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setsocksfirewallproxystate", service, "on"]).status();
         push_log(&app, &state, "System proxy enabled for Wi-Fi.");
     } else {
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setwebproxystate", service, "off"]).status();
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setsecurewebproxystate", service, "off"]).status();
-        let _ = Command::new("/usr/sbin/networksetup").args(["-setsocksfirewallproxystate", service, "off"]).status();
         push_log(&app, &state, "System proxy disabled for Wi-Fi.");
     }
     Ok(())
 }
 
 #[tauri::command]
-async fn set_shell_proxy(app: AppHandle, state: State<'_, Arc<AppState>>, enabled: bool) -> Result<(), String> {
+async fn set_shell_proxy(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
     let config = read_config_value(&app)?;
     let http_port = port_from_config(&config, "listen", "http_port", 18080);
     let socks_port = port_from_config(&config, "listen", "socks_port", 18081);
@@ -561,7 +632,11 @@ async fn set_shell_proxy(app: AppHandle, state: State<'_, Arc<AppState>>, enable
         let old = fs::read_to_string(&path).unwrap_or_default();
         let cleaned = remove_managed_block(&old);
         if enabled {
-            let next = format!("{}\n\n{}", cleaned.trim(), shell_block(&shell, http_port, socks_port));
+            let next = format!(
+                "{}\n\n{}",
+                cleaned.trim(),
+                shell_block(&shell, http_port, socks_port)
+            );
             fs::write(&path, next.trim_start()).map_err(|e| e.to_string())?;
         } else if cleaned.trim().is_empty() {
             let _ = fs::remove_file(&path);
@@ -572,7 +647,11 @@ async fn set_shell_proxy(app: AppHandle, state: State<'_, Arc<AppState>>, enable
     push_log(
         &app,
         &state,
-        if enabled { "Shell proxy configured." } else { "Shell proxy removed." },
+        if enabled {
+            "Shell proxy configured."
+        } else {
+            "Shell proxy removed."
+        },
     );
     Ok(())
 }
@@ -683,13 +762,21 @@ async fn get_login_item_enabled() -> Result<bool, String> {
 }
 
 #[tauri::command]
-async fn set_login_item_enabled(app: AppHandle, state: State<'_, Arc<AppState>>, enabled: bool) -> Result<bool, String> {
+async fn set_login_item_enabled(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<bool, String> {
     let path = launch_agent_path()?;
     if enabled {
-        let parent = path.parent().ok_or_else(|| "invalid LaunchAgents path".to_string())?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| "invalid LaunchAgents path".to_string())?;
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let exe = exe.to_str().ok_or_else(|| "invalid executable path".to_string())?;
+        let exe = exe
+            .to_str()
+            .ok_or_else(|| "invalid executable path".to_string())?;
         fs::write(&path, login_item_plist(exe)).map_err(|e| e.to_string())?;
         push_log(&app, &state, "Login auto start enabled.");
     } else {
@@ -697,7 +784,11 @@ async fn set_login_item_enabled(app: AppHandle, state: State<'_, Arc<AppState>>,
             let uid = user_id();
             if !uid.is_empty() {
                 let _ = Command::new("/bin/launchctl")
-                    .args(["bootout", &format!("gui/{uid}"), path.to_str().unwrap_or_default()])
+                    .args([
+                        "bootout",
+                        &format!("gui/{uid}"),
+                        path.to_str().unwrap_or_default(),
+                    ])
                     .status();
             }
             fs::remove_file(&path).map_err(|e| e.to_string())?;
@@ -713,11 +804,19 @@ async fn list_app_proxy_entries() -> Result<Vec<AppProxyEntry>, String> {
 }
 
 #[tauri::command]
-async fn choose_app_for_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<Vec<AppProxyEntry>, String> {
-    let script = r#"POSIX path of (choose file of type {"app"} with prompt "选择要通过代理启动的应用")"#;
-    let selected = command_output("/usr/bin/osascript", &["-e", script], Duration::from_secs(120))?
-        .trim()
-        .to_string();
+async fn choose_app_for_proxy(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<AppProxyEntry>, String> {
+    let script =
+        r#"POSIX path of (choose file of type {"app"} with prompt "选择要通过代理启动的应用")"#;
+    let selected = command_output(
+        "/usr/bin/osascript",
+        &["-e", script],
+        Duration::from_secs(120),
+    )?
+    .trim()
+    .to_string();
     if selected.is_empty() {
         return read_app_proxy_entries();
     }
@@ -736,7 +835,11 @@ async fn choose_app_for_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -
 }
 
 #[tauri::command]
-async fn remove_app_proxy_entry(app: AppHandle, state: State<'_, Arc<AppState>>, id: String) -> Result<Vec<AppProxyEntry>, String> {
+async fn remove_app_proxy_entry(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<AppProxyEntry>, String> {
     let mut entries = read_app_proxy_entries()?;
     entries.retain(|entry| entry.id != id);
     write_app_proxy_entries(&entries)?;
@@ -745,7 +848,11 @@ async fn remove_app_proxy_entry(app: AppHandle, state: State<'_, Arc<AppState>>,
 }
 
 #[tauri::command]
-async fn launch_app_with_proxy(app: AppHandle, state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+async fn launch_app_with_proxy(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<(), String> {
     let config = read_config_value(&app)?;
     let http_port = port_from_config(&config, "listen", "http_port", 18080);
     let socks_port = port_from_config(&config, "listen", "socks_port", 18081);
@@ -832,28 +939,39 @@ fn main() {
         let started = Instant::now();
         match detect_astrill_port_sync() {
             Ok(Some(port)) => {
-                println!("detect_astrill_port=Some({port}) elapsed_ms={}", started.elapsed().as_millis());
+                println!(
+                    "detect_astrill_port=Some({port}) elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
                 std::process::exit(0);
             }
             Ok(None) => {
-                println!("detect_astrill_port=None elapsed_ms={}", started.elapsed().as_millis());
+                println!(
+                    "detect_astrill_port=None elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
                 std::process::exit(0);
             }
             Err(error) => {
-                eprintln!("detect_astrill_port_error={error} elapsed_ms={}", started.elapsed().as_millis());
+                eprintln!(
+                    "detect_astrill_port_error={error} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
                 std::process::exit(1);
             }
         }
     }
     let args = std::env::args().collect::<Vec<_>>();
     if let Some(index) = args.iter().position(|arg| arg == "--self-test-traffic") {
-        let path = args
-            .get(index + 1)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| traffic_log_path().unwrap_or_else(|_| PathBuf::from("traffic.jsonl")));
+        let path = args.get(index + 1).map(PathBuf::from).unwrap_or_else(|| {
+            traffic_log_path().unwrap_or_else(|_| PathBuf::from("traffic.jsonl"))
+        });
         match read_traffic_stats_from_path(path) {
             Ok(stats) => {
-                println!("{}", serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".into()));
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".into())
+                );
                 std::process::exit(0);
             }
             Err(error) => {
@@ -882,13 +1000,18 @@ fn main() {
         let exe = std::env::current_exe()
             .ok()
             .and_then(|path| path.to_str().map(str::to_string))
-            .unwrap_or_else(|| "/Applications/AstrillSplitProxy.app/Contents/MacOS/astrill-split-proxy".into());
+            .unwrap_or_else(|| {
+                "/Applications/AstrillSplitProxy.app/Contents/MacOS/astrill-split-proxy".into()
+            });
         let path = std::env::temp_dir().join(format!("{LAUNCH_AGENT_ID}.selftest.plist"));
         if let Err(error) = fs::write(&path, login_item_plist(&exe)) {
             eprintln!("login_plist_write_error={error}");
             std::process::exit(1);
         }
-        let result = Command::new("/usr/bin/plutil").arg("-lint").arg(&path).output();
+        let result = Command::new("/usr/bin/plutil")
+            .arg("-lint")
+            .arg(&path)
+            .output();
         let _ = fs::remove_file(&path);
         match result {
             Ok(output) if output.status.success() => {

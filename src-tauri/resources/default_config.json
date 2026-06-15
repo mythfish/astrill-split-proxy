@@ -10,6 +10,7 @@
     "port": 32768
   },
   "default_route": "direct",
+  "auto_system_proxy": false,
   "rules": {
     "direct": [
       "localhost",

@@ -47,6 +47,7 @@ const initialConfig = {
   socksPort: 18081,
   upstreamPort: 32768,
   defaultRoute: 'direct',
+  autoSystemProxy: false,
   proxyRules: '',
   directRules: '',
 };
@@ -139,6 +140,7 @@ export default function App() {
       socksPort: raw.listen?.socks_port ?? 18081,
       upstreamPort: raw.upstream?.port ?? 32768,
       defaultRoute: raw.default_route ?? 'direct',
+      autoSystemProxy: Boolean(raw.auto_system_proxy),
       proxyRules: (raw.rules?.proxy ?? []).join('\n'),
       directRules: (raw.rules?.direct ?? []).join('\n'),
     });
@@ -170,6 +172,7 @@ export default function App() {
         socks_port: Number(config.socksPort),
         upstream_port: Number(config.upstreamPort),
         default_route: config.defaultRoute,
+        auto_system_proxy: Boolean(config.autoSystemProxy),
         proxy_rules: lines(config.proxyRules),
         direct_rules: lines(config.directRules),
       },
@@ -293,6 +296,14 @@ export default function App() {
                   value={config.defaultRoute}
                   disabled={configLocked}
                   onChange={(value) => setConfig((old) => ({ ...old, defaultRoute: value }))}
+                />
+              </Flex>
+              <Flex justify="space-between" align="center" gap={12} className="route-line">
+                <Text type="secondary">启动代理后自动开启系统代理</Text>
+                <Switch
+                  checked={config.autoSystemProxy}
+                  disabled={configLocked}
+                  onChange={(checked) => setConfig((old) => ({ ...old, autoSystemProxy: checked }))}
                 />
               </Flex>
               <Divider />
