@@ -1,0 +1,23 @@
+{
+  "name": "astrill-split-proxy",
+  "version": "2.0.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "tauri dev",
+    "build:web": "vite build",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "vite": "^8.0.16"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "antd": "^6.4.4",
+    "lucide-react": "^1.18.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  }
+}

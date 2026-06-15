@@ -1,0 +1,39 @@
+{
+  "listen": {
+    "http_host": "127.0.0.1",
+    "http_port": 18080,
+    "socks_host": "127.0.0.1",
+    "socks_port": 18081
+  },
+  "upstream": {
+    "host": "127.0.0.1",
+    "port": 32768
+  },
+  "default_route": "direct",
+  "rules": {
+    "direct": [
+      "localhost",
+      "127.0.0.0/8",
+      "::1",
+      ".local",
+      ".lan",
+      ".cn"
+    ],
+    "proxy": [
+      "google.com",
+      "googleapis.com",
+      "gstatic.com",
+      "github.com",
+      "githubusercontent.com",
+      "openai.com",
+      "chatgpt.com",
+      "youtube.com",
+      "ytimg.com",
+      "x.com",
+      "twitter.com",
+      "telegram.org",
+      "wikipedia.org"
+    ]
+  },
+  "log_level": "info"
+}

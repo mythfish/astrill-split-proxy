@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Astrill Split Proxy",
+  "version": "2.0.0",
+  "identifier": "local.astrill-split-proxy",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "npm run build:web",
+    "frontendDist": "../dist",
+    "devUrl": null
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Astrill Split Proxy",
+        "width": 980,
+        "height": 720,
+        "minWidth": 820,
+        "minHeight": 620,
+        "resizable": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "app",
+    "icon": [
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "resources": [
+      "resources/astrill_split_proxy.py",
+      "resources/default_config.json"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}
