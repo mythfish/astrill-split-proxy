@@ -48,6 +48,7 @@ const initialConfig = {
   upstreamPort: 32768,
   defaultRoute: 'direct',
   autoSystemProxy: false,
+  shellProxyTarget: 'split_proxy',
   proxyRules: '',
   directRules: '',
 };
@@ -55,6 +56,11 @@ const initialConfig = {
 const routeOptions = [
   { label: 'Direct', value: 'direct' },
   { label: 'Proxy', value: 'proxy' },
+];
+
+const shellTargetOptions = [
+  { label: 'SplitProxy', value: 'split_proxy' },
+  { label: 'Astrill', value: 'astrill' },
 ];
 
 function lines(text) {
@@ -141,6 +147,7 @@ export default function App() {
       upstreamPort: raw.upstream?.port ?? 32768,
       defaultRoute: raw.default_route ?? 'direct',
       autoSystemProxy: Boolean(raw.auto_system_proxy),
+      shellProxyTarget: raw.shell_proxy_target === 'astrill' ? 'astrill' : 'split_proxy',
       proxyRules: (raw.rules?.proxy ?? []).join('\n'),
       directRules: (raw.rules?.direct ?? []).join('\n'),
     });
@@ -173,6 +180,7 @@ export default function App() {
         upstream_port: Number(config.upstreamPort),
         default_route: config.defaultRoute,
         auto_system_proxy: Boolean(config.autoSystemProxy),
+        shell_proxy_target: config.shellProxyTarget,
         proxy_rules: lines(config.proxyRules),
         direct_rules: lines(config.directRules),
       },
@@ -235,6 +243,7 @@ export default function App() {
   const shellProxyOn = status.shell_proxy === '已配置';
   const shellProxyOff = status.shell_proxy === '未配置';
   const hasTraffic = Number(traffic.total ?? 0) > 0;
+  const shellTargetLabel = config.shellProxyTarget === 'astrill' ? `Astrill:${config.upstreamPort}` : `SplitProxy:${config.httpPort}/${config.socksPort}`;
 
   const controlTab = (
     <div className="tab-body">
@@ -366,6 +375,15 @@ export default function App() {
               </Col>
             </Row>
             <Divider />
+            <Flex justify="space-between" align="center" gap={12} className="route-line">
+              <Text type="secondary">Shell 目标</Text>
+              <Segmented
+                options={shellTargetOptions}
+                value={config.shellProxyTarget}
+                disabled={isBusy}
+                onChange={(value) => setConfig((old) => ({ ...old, shellProxyTarget: value }))}
+              />
+            </Flex>
             <Flex wrap gap={8} className="verify-actions">
               <Button
                 icon={icon(<ClipboardCheck size={16} />)}
@@ -386,7 +404,17 @@ export default function App() {
               <Button danger loading={busy === 'system-off'} disabled={isBusy || systemProxyOff} onClick={() => runAction('system-off', '关闭系统代理', () => invoke('set_system_proxy', { enabled: false }))}>
                 系统关
               </Button>
-              <Button icon={icon(<Terminal size={16} />)} loading={busy === 'shell-on'} disabled={isBusy || shellProxyOn} onClick={() => runAction('shell-on', '配置 Shell 代理', () => invoke('set_shell_proxy', { enabled: true }))}>
+              <Button
+                icon={icon(<Terminal size={16} />)}
+                loading={busy === 'shell-on'}
+                disabled={isBusy}
+                onClick={() =>
+                  runAction('shell-on', `配置 Shell 代理：${shellTargetLabel}`, async () => {
+                    await saveConfig();
+                    await invoke('set_shell_proxy', { enabled: true, target: config.shellProxyTarget });
+                  })
+                }
+              >
                 Shell 开
               </Button>
               <Button danger loading={busy === 'shell-off'} disabled={isBusy || shellProxyOff} onClick={() => runAction('shell-off', '移除 Shell 代理', () => invoke('set_shell_proxy', { enabled: false }))}>

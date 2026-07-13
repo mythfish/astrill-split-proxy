@@ -43,6 +43,7 @@ struct SaveRequest {
     upstream_port: u16,
     default_route: String,
     auto_system_proxy: bool,
+    shell_proxy_target: Option<String>,
     proxy_rules: Vec<String>,
     direct_rules: Vec<String>,
 }
@@ -130,6 +131,13 @@ fn port_from_config(config: &Value, group: &str, key: &str, fallback: u16) -> u1
 
 fn bool_from_config(config: &Value, key: &str, fallback: bool) -> bool {
     config.get(key).and_then(Value::as_bool).unwrap_or(fallback)
+}
+
+fn shell_proxy_target_from_config(config: &Value) -> String {
+    match config.get("shell_proxy_target").and_then(Value::as_str) {
+        Some("astrill") => "astrill".into(),
+        _ => "split_proxy".into(),
+    }
 }
 
 fn running_proxy_pids() -> Result<Vec<u32>, String> {
@@ -472,13 +480,17 @@ fn remove_managed_block(text: &str) -> String {
     result.trim().to_string()
 }
 
-fn shell_block(shell: &str, http_port: u16, socks_port: u16) -> String {
+fn shell_block(shell: &str, http_port: u16, socks_port: Option<u16>, target_label: &str) -> String {
+    let all_proxy = socks_port
+        .map(|port| format!("socks5h://127.0.0.1:{port}"))
+        .unwrap_or_else(|| format!("http://127.0.0.1:{http_port}"));
     if shell == "fish" {
         format!(
             r#"{SHELL_START}
+# Target: {target_label}
 set -gx http_proxy "http://127.0.0.1:{http_port}"
 set -gx https_proxy "http://127.0.0.1:{http_port}"
-set -gx all_proxy "socks5h://127.0.0.1:{socks_port}"
+set -gx all_proxy "{all_proxy}"
 set -gx HTTP_PROXY $http_proxy
 set -gx HTTPS_PROXY $https_proxy
 set -gx ALL_PROXY $all_proxy
@@ -490,9 +502,10 @@ set -q NO_PROXY; or set -gx NO_PROXY $no_proxy
     } else {
         format!(
             r#"{SHELL_START}
+# Target: {target_label}
 export http_proxy="http://127.0.0.1:{http_port}"
 export https_proxy="http://127.0.0.1:{http_port}"
-export all_proxy="socks5h://127.0.0.1:{socks_port}"
+export all_proxy="{all_proxy}"
 export HTTP_PROXY="$http_proxy"
 export HTTPS_PROXY="$https_proxy"
 export ALL_PROXY="$all_proxy"
@@ -560,6 +573,7 @@ async fn save_config(app: AppHandle, req: SaveRequest) -> Result<(), String> {
         },
         "default_route": req.default_route,
         "auto_system_proxy": req.auto_system_proxy,
+        "shell_proxy_target": req.shell_proxy_target.unwrap_or_else(|| "split_proxy".into()),
         "rules": {
             "proxy": req.proxy_rules,
             "direct": req.direct_rules
@@ -761,10 +775,26 @@ async fn set_shell_proxy(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     enabled: bool,
+    target: Option<String>,
 ) -> Result<(), String> {
     let config = read_config_value(&app)?;
-    let http_port = port_from_config(&config, "listen", "http_port", 18080);
-    let socks_port = port_from_config(&config, "listen", "socks_port", 18081);
+    let target = target.unwrap_or_else(|| shell_proxy_target_from_config(&config));
+    let use_astrill = target == "astrill";
+    let http_port = if use_astrill {
+        port_from_config(&config, "upstream", "port", 32768)
+    } else {
+        port_from_config(&config, "listen", "http_port", 18080)
+    };
+    let socks_port = if use_astrill {
+        None
+    } else {
+        Some(port_from_config(&config, "listen", "socks_port", 18081))
+    };
+    let target_label = if use_astrill {
+        "Astrill OpenWeb"
+    } else {
+        "AstrillSplitProxy"
+    };
     for (shell, path) in shell_paths()? {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -775,7 +805,7 @@ async fn set_shell_proxy(
             let next = format!(
                 "{}\n\n{}",
                 cleaned.trim(),
-                shell_block(&shell, http_port, socks_port)
+                shell_block(&shell, http_port, socks_port, target_label)
             );
             fs::write(&path, next.trim_start()).map_err(|e| e.to_string())?;
         } else if cleaned.trim().is_empty() {
@@ -788,7 +818,11 @@ async fn set_shell_proxy(
         &app,
         &state,
         if enabled {
-            "Shell proxy configured."
+            if use_astrill {
+                "Shell proxy configured for Astrill OpenWeb."
+            } else {
+                "Shell proxy configured for AstrillSplitProxy."
+            }
         } else {
             "Shell proxy removed."
         },
