@@ -23,6 +23,7 @@ const LAUNCH_AGENT_ID: &str = "local.astrill-split-proxy";
 #[derive(Default)]
 struct AppState {
     proxy: Mutex<Option<Child>>,
+    gemini: Mutex<Option<Child>>,
     logs: Mutex<Vec<String>>,
 }
 
@@ -32,6 +33,8 @@ struct Status {
     http_port: u16,
     socks_port: u16,
     upstream_port: u16,
+    gemini_running: bool,
+    gemini_port: u16,
     system_proxy: String,
     shell_proxy: String,
 }
@@ -44,6 +47,9 @@ struct SaveRequest {
     default_route: String,
     auto_system_proxy: bool,
     shell_proxy_target: Option<String>,
+    gemini_port: Option<u16>,
+    gemini_api_key: Option<String>,
+    gemini_upstream: Option<String>,
     proxy_rules: Vec<String>,
     direct_rules: Vec<String>,
 }
@@ -129,6 +135,15 @@ fn port_from_config(config: &Value, group: &str, key: &str, fallback: u16) -> u1
         .unwrap_or(fallback)
 }
 
+fn gemini_port_from_config(config: &Value) -> u16 {
+    config
+        .get("gemini")
+        .and_then(|v| v.get("port"))
+        .and_then(Value::as_u64)
+        .map(|v| v as u16)
+        .unwrap_or(18082)
+}
+
 fn bool_from_config(config: &Value, key: &str, fallback: bool) -> bool {
     config.get(key).and_then(Value::as_bool).unwrap_or(fallback)
 }
@@ -141,10 +156,18 @@ fn shell_proxy_target_from_config(config: &Value) -> String {
 }
 
 fn running_proxy_pids() -> Result<Vec<u32>, String> {
+    running_script_pids("astrill_split_proxy.py")
+}
+
+fn running_gemini_pids() -> Result<Vec<u32>, String> {
+    running_script_pids("gemini_api_proxy.py")
+}
+
+fn running_script_pids(script_name: &str) -> Result<Vec<u32>, String> {
     let config = config_path()?.to_string_lossy().to_string();
     let pids = command_output(
         "/usr/bin/pgrep",
-        &["-f", "astrill_split_proxy.py"],
+        &["-f", script_name],
         Duration::from_secs(2),
     )
     .unwrap_or_default();
@@ -157,7 +180,7 @@ fn running_proxy_pids() -> Result<Vec<u32>, String> {
         ) else {
             continue;
         };
-        if line.contains("astrill_split_proxy.py") && line.contains(&config) {
+        if line.contains(script_name) && line.contains(&config) {
             if let Ok(pid) = pid.parse::<u32>() {
                 result.push(pid);
             }
@@ -173,7 +196,14 @@ fn kill_running_proxy_pids() -> Result<(), String> {
     Ok(())
 }
 
-fn bundled_proxy_script_path() -> Result<PathBuf, String> {
+fn kill_running_gemini_pids() -> Result<(), String> {
+    for pid in running_gemini_pids()? {
+        let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+    }
+    Ok(())
+}
+
+fn bundled_resource_script_path(script_name: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let contents = exe
         .parent()
@@ -182,7 +212,7 @@ fn bundled_proxy_script_path() -> Result<PathBuf, String> {
     let bundled = contents
         .join("Resources")
         .join("resources")
-        .join("astrill_split_proxy.py");
+        .join(script_name);
     if bundled.exists() {
         return Ok(bundled);
     }
@@ -191,15 +221,20 @@ fn bundled_proxy_script_path() -> Result<PathBuf, String> {
         .map_err(|e| e.to_string())?
         .join("src-tauri")
         .join("resources")
-        .join("astrill_split_proxy.py");
+        .join(script_name);
     if dev.exists() {
         return Ok(dev);
     }
 
-    Err(format!(
-        "proxy worker not found at {}",
-        bundled.to_string_lossy()
-    ))
+    Err(format!("worker not found at {}", bundled.to_string_lossy()))
+}
+
+fn bundled_proxy_script_path() -> Result<PathBuf, String> {
+    bundled_resource_script_path("astrill_split_proxy.py")
+}
+
+fn bundled_gemini_script_path() -> Result<PathBuf, String> {
+    bundled_resource_script_path("gemini_api_proxy.py")
 }
 
 fn local_port_open(port: u16) -> bool {
@@ -213,6 +248,19 @@ fn wait_for_proxy_ports(http_port: u16, socks_port: u16, timeout: Duration) -> b
     let started = Instant::now();
     loop {
         if local_port_open(http_port) && local_port_open(socks_port) {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_port(port: u16, timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if local_port_open(port) {
             return true;
         }
         if started.elapsed() >= timeout {
@@ -267,6 +315,63 @@ fn self_test_start_stop() -> Result<String, String> {
 
     Ok(format!(
         "start_stop=ok script={} http_port={http_port} socks_port={socks_port}",
+        script.to_string_lossy()
+    ))
+}
+
+fn self_test_gemini_start_stop() -> Result<String, String> {
+    if !running_gemini_pids()?.is_empty() {
+        return Err("gemini worker is already running".into());
+    }
+
+    let config_path = config_path()?;
+    let config_data = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+    let config: Value = serde_json::from_str(&config_data).map_err(|e| e.to_string())?;
+    let port = gemini_port_from_config(&config);
+    if local_port_open(port) {
+        return Err(format!("gemini port already open before start: {port}"));
+    }
+
+    let script = bundled_gemini_script_path()?;
+    let mut child = Command::new("/usr/bin/python3")
+        .arg(&script)
+        .arg("-c")
+        .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let started = wait_for_port(port, Duration::from_secs(5));
+    let health = if started {
+        command_output(
+            "/usr/bin/curl",
+            &["-m", "5", "-sS", &format!("http://127.0.0.1:{port}/health")],
+            Duration::from_secs(6),
+        )
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let _ = child.kill();
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !started {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "gemini worker did not open port".into()
+        } else {
+            format!("gemini worker did not open port: {stderr}")
+        });
+    }
+    if !health.contains("\"ok\":true") {
+        return Err(format!("gemini health check failed: {health}"));
+    }
+    thread::sleep(Duration::from_millis(300));
+    if local_port_open(port) {
+        return Err("gemini port stayed open after stop".into());
+    }
+    Ok(format!(
+        "gemini_start_stop=ok script={} port={port}",
         script.to_string_lossy()
     ))
 }
@@ -560,6 +665,16 @@ async fn load_config(app: AppHandle) -> Result<Value, String> {
 #[tauri::command]
 async fn save_config(app: AppHandle, req: SaveRequest) -> Result<(), String> {
     ensure_config(&app)?;
+    let old_config = read_config_value(&app).unwrap_or_else(|_| json!({}));
+    let old_gemini = old_config
+        .get("gemini")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let gemini_upstream = match req.gemini_upstream.as_deref() {
+        Some("direct") => "direct",
+        Some("astrill") => "astrill",
+        _ => "split_proxy",
+    };
     let config = json!({
         "listen": {
             "http_host": "127.0.0.1",
@@ -574,6 +689,18 @@ async fn save_config(app: AppHandle, req: SaveRequest) -> Result<(), String> {
         "default_route": req.default_route,
         "auto_system_proxy": req.auto_system_proxy,
         "shell_proxy_target": req.shell_proxy_target.unwrap_or_else(|| "split_proxy".into()),
+        "gemini": {
+            "host": "127.0.0.1",
+            "port": req.gemini_port.unwrap_or_else(|| gemini_port_from_config(&old_config)),
+            "api_key": req.gemini_api_key.unwrap_or_else(|| {
+                old_gemini
+                    .get("api_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            }),
+            "upstream": gemini_upstream
+        },
         "rules": {
             "proxy": req.proxy_rules,
             "direct": req.direct_rules
@@ -603,11 +730,26 @@ async fn get_status(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<S
             None => !running_proxy_pids()?.is_empty(),
         }
     };
+    let gemini_running = {
+        let mut child = state.gemini.lock().map_err(|e| e.to_string())?;
+        match child.as_mut() {
+            Some(process) => match process.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) | Err(_) => {
+                    *child = None;
+                    !running_gemini_pids()?.is_empty()
+                }
+            },
+            None => !running_gemini_pids()?.is_empty(),
+        }
+    };
     Ok(Status {
         running,
         http_port: port_from_config(&config, "listen", "http_port", 18080),
         socks_port: port_from_config(&config, "listen", "socks_port", 18081),
         upstream_port: port_from_config(&config, "upstream", "port", 32768),
+        gemini_running,
+        gemini_port: gemini_port_from_config(&config),
         system_proxy: system_proxy_summary("Wi-Fi"),
         shell_proxy: shell_configured(),
     })
@@ -708,6 +850,136 @@ async fn stop_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(
     kill_running_proxy_pids()?;
     push_log(&app, &state, "Proxy stopped.");
     Ok(())
+}
+
+#[tauri::command]
+async fn start_gemini_api(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let config = read_config_value(&app)?;
+    let gemini = config.get("gemini").cloned().unwrap_or_else(|| json!({}));
+    let api_key = gemini
+        .get("api_key")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if api_key.is_empty() {
+        return Err("请先配置 Gemini API Key".into());
+    }
+    let port = gemini_port_from_config(&config);
+    let mut guard = state.gemini.lock().map_err(|e| e.to_string())?;
+    if let Some(process) = guard.as_mut() {
+        match process.try_wait() {
+            Ok(None) => {
+                push_log(&app, &state, "Gemini API gateway is already running.");
+                return Ok(());
+            }
+            Ok(Some(_)) | Err(_) => {
+                *guard = None;
+            }
+        }
+    }
+    if !running_gemini_pids()?.is_empty() {
+        push_log(&app, &state, "Gemini API gateway is already running.");
+        return Ok(());
+    }
+    if local_port_open(port) {
+        return Err(format!("Gemini API 端口已被占用：{port}"));
+    }
+
+    let script = app
+        .path()
+        .resolve(
+            "resources/gemini_api_proxy.py",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| e.to_string())?;
+    let config_path = config_path()?;
+    let mut child = Command::new("/usr/bin/python3")
+        .arg(script)
+        .arg("-c")
+        .arg(config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    if !wait_for_port(port, Duration::from_secs(5)) {
+        let _ = child.kill();
+        let output = child.wait_with_output().map_err(|e| e.to_string())?;
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Gemini API gateway did not open port.".into()
+        } else {
+            stderr
+        });
+    }
+
+    if let Some(mut err) = child.stderr.take() {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = err.read_to_string(&mut text);
+            if !text.is_empty() {
+                let _ = app_clone.emit("log", text);
+            }
+        });
+    }
+
+    *guard = Some(child);
+    drop(guard);
+    push_log(
+        &app,
+        &state,
+        format!("Gemini API gateway started on 127.0.0.1:{port}."),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_gemini_api(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let mut guard = state.gemini.lock().map_err(|e| e.to_string())?;
+    if let Some(child) = guard.as_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    *guard = None;
+    kill_running_gemini_pids()?;
+    push_log(&app, &state, "Gemini API gateway stopped.");
+    Ok(())
+}
+
+#[tauri::command]
+async fn test_gemini_api(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let config = read_config_value(&app)?;
+    let port = gemini_port_from_config(&config);
+    push_log(&app, &state, "Testing Gemini API gateway...");
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        command_output(
+            "/usr/bin/curl",
+            &[
+                "-m",
+                "30",
+                "-sS",
+                &format!("http://127.0.0.1:{port}/v1/models"),
+            ],
+            Duration::from_secs(32),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let ok = output.contains("\"data\"") || output.contains("\"object\"");
+    push_log(
+        &app,
+        &state,
+        if ok {
+            "Gemini API gateway test completed."
+        } else {
+            "Gemini API gateway returned an error."
+        },
+    );
+    Ok(json!({
+        "ok": ok,
+        "output": output.chars().take(1200).collect::<String>()
+    }))
 }
 
 #[tauri::command]
@@ -1088,7 +1360,11 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                     let _ = stop_proxy(app.clone(), state).await;
                 });
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                let _ = kill_running_proxy_pids();
+                let _ = kill_running_gemini_pids();
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -1226,6 +1502,21 @@ fn main() {
             }
         }
     }
+    if args
+        .iter()
+        .any(|arg| arg == "--self-test-gemini-start-stop")
+    {
+        match self_test_gemini_start_stop() {
+            Ok(message) => {
+                println!("{message}");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("gemini_start_stop_error={error}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1237,6 +1528,9 @@ fn main() {
             detect_astrill_port,
             start_proxy,
             stop_proxy,
+            start_gemini_api,
+            stop_gemini_api,
+            test_gemini_api,
             test_country,
             set_system_proxy,
             set_shell_proxy,

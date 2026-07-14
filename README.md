@@ -13,6 +13,7 @@ It is built with Tauri, React, Ant Design, Rust, and a Python proxy worker.
 - Optionally enable the macOS system proxy automatically after the local proxy starts.
 - Write shell proxy config for zsh, bash, and fish.
 - Monitor recent traffic and see which hosts used the proxy route.
+- Expose a local OpenAI-compatible Gemini API gateway backed by a Google Gemini API key.
 - Keep running from the macOS menu bar after closing the window.
 - Optional login auto-start via LaunchAgent.
 - Launch selected applications with proxy environment variables.
@@ -88,6 +89,26 @@ For Chromium/Electron-style apps, it also passes:
 ```
 
 This only affects applications launched from Astrill Split Proxy. It does not transparently take over already-running applications. Some native apps may ignore proxy environment variables.
+
+## Gemini API Gateway
+
+The `Gemini API` tab starts a local OpenAI-compatible gateway for clients that can customize an API base URL.
+
+Default local endpoint:
+
+```text
+http://127.0.0.1:18082/v1
+```
+
+Configure your Google Gemini API key in the app, choose an outbound path (`SplitProxy`, `Astrill`, or `Direct`), then start the gateway. Client apps can use:
+
+```text
+base_url = "http://127.0.0.1:18082/v1"
+api_key = "any-non-empty-string"
+model = "gemini-3.5-flash"
+```
+
+The local gateway injects the configured Google Gemini API key when forwarding requests to Google's OpenAI-compatible Gemini endpoint.
 
 ## Data Files
 

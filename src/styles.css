@@ -151,6 +151,41 @@ textarea {
   white-space: nowrap;
 }
 
+.endpoint-box,
+.client-snippet {
+  display: grid;
+  gap: 8px;
+}
+
+.endpoint-box {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.endpoint-box code {
+  overflow-wrap: anywhere;
+}
+
+.client-snippet pre,
+.test-output {
+  min-height: 88px;
+  margin: 8px 0 0;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: #f7faf7;
+  color: #26352e;
+  font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .log-card {
   margin-top: 16px;
 }

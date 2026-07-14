@@ -30,11 +30,13 @@ import {
   Compass,
   Eraser,
   Globe2,
+  KeyRound,
   Play,
   Radar,
   RefreshCcw,
   Save,
   Search,
+  Server,
   ShieldCheck,
   Terminal,
   Trash2,
@@ -49,6 +51,9 @@ const initialConfig = {
   defaultRoute: 'direct',
   autoSystemProxy: false,
   shellProxyTarget: 'split_proxy',
+  geminiPort: 18082,
+  geminiApiKey: '',
+  geminiUpstream: 'split_proxy',
   proxyRules: '',
   directRules: '',
 };
@@ -61,6 +66,12 @@ const routeOptions = [
 const shellTargetOptions = [
   { label: 'SplitProxy', value: 'split_proxy' },
   { label: 'Astrill', value: 'astrill' },
+];
+
+const geminiUpstreamOptions = [
+  { label: 'SplitProxy', value: 'split_proxy' },
+  { label: 'Astrill', value: 'astrill' },
+  { label: 'Direct', value: 'direct' },
 ];
 
 function lines(text) {
@@ -93,6 +104,7 @@ export default function App() {
   const [config, setConfig] = useState(initialConfig);
   const [status, setStatus] = useState({
     running: false,
+    gemini_running: false,
     system_proxy: '检测中',
     shell_proxy: '检测中',
   });
@@ -108,6 +120,7 @@ export default function App() {
   });
   const [loginItemEnabled, setLoginItemEnabled] = useState(false);
   const [appEntries, setAppEntries] = useState([]);
+  const [geminiTest, setGeminiTest] = useState('');
   const [busy, setBusy] = useState('');
 
   useEffect(() => {
@@ -148,6 +161,9 @@ export default function App() {
       defaultRoute: raw.default_route ?? 'direct',
       autoSystemProxy: Boolean(raw.auto_system_proxy),
       shellProxyTarget: raw.shell_proxy_target === 'astrill' ? 'astrill' : 'split_proxy',
+      geminiPort: raw.gemini?.port ?? 18082,
+      geminiApiKey: raw.gemini?.api_key ?? '',
+      geminiUpstream: ['split_proxy', 'astrill', 'direct'].includes(raw.gemini?.upstream) ? raw.gemini.upstream : 'split_proxy',
       proxyRules: (raw.rules?.proxy ?? []).join('\n'),
       directRules: (raw.rules?.direct ?? []).join('\n'),
     });
@@ -181,6 +197,9 @@ export default function App() {
         default_route: config.defaultRoute,
         auto_system_proxy: Boolean(config.autoSystemProxy),
         shell_proxy_target: config.shellProxyTarget,
+        gemini_port: Number(config.geminiPort),
+        gemini_api_key: config.geminiApiKey,
+        gemini_upstream: config.geminiUpstream,
         proxy_rules: lines(config.proxyRules),
         direct_rules: lines(config.directRules),
       },
@@ -237,13 +256,16 @@ export default function App() {
 
   const isBusy = Boolean(busy);
   const proxyRunning = Boolean(status.running);
+  const geminiRunning = Boolean(status.gemini_running);
   const configLocked = isBusy || proxyRunning;
+  const geminiLocked = isBusy || geminiRunning;
   const systemProxyOn = status.system_proxy === '已开启';
   const systemProxyOff = status.system_proxy === '已关闭';
   const shellProxyOn = status.shell_proxy === '已配置';
   const shellProxyOff = status.shell_proxy === '未配置';
   const hasTraffic = Number(traffic.total ?? 0) > 0;
   const shellTargetLabel = config.shellProxyTarget === 'astrill' ? `Astrill:${config.upstreamPort}` : `SplitProxy:${config.httpPort}/${config.socksPort}`;
+  const geminiBaseUrl = `http://127.0.0.1:${config.geminiPort}/v1`;
 
   const controlTab = (
     <div className="tab-body">
@@ -617,6 +639,117 @@ export default function App() {
     </div>
   );
 
+  const geminiTab = (
+    <div className="tab-body">
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={14}>
+          <Card
+            className="section-card"
+            title={
+              <Space>
+                {icon(<Server size={18} />)}
+                Gemini API
+              </Space>
+            }
+            extra={<Tag color={geminiRunning ? 'success' : 'default'}>{geminiRunning ? 'Running' : 'Stopped'}</Tag>}
+          >
+            <Form layout="vertical">
+              <Row gutter={12}>
+                <Col xs={24} md={10}>
+                  <Form.Item label="本地端口">
+                    <InputNumber
+                      min={1}
+                      max={65535}
+                      value={config.geminiPort}
+                      disabled={geminiLocked}
+                      onChange={(value) => setConfig((old) => ({ ...old, geminiPort: value ?? 18082 }))}
+                      className="full"
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={14}>
+                  <Form.Item label="出口路径">
+                    <Segmented
+                      block
+                      options={geminiUpstreamOptions}
+                      value={config.geminiUpstream}
+                      disabled={geminiLocked}
+                      onChange={(value) => setConfig((old) => ({ ...old, geminiUpstream: value }))}
+                    />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Form.Item label="Gemini API Key">
+                <Input.Password
+                  value={config.geminiApiKey}
+                  disabled={geminiLocked}
+                  prefix={icon(<KeyRound size={15} />)}
+                  placeholder="AIza..."
+                  autoComplete="off"
+                  onChange={(event) => setConfig((old) => ({ ...old, geminiApiKey: event.target.value }))}
+                />
+              </Form.Item>
+              <div className="endpoint-box">
+                <Text type="secondary">Base URL</Text>
+                <Text code>{geminiBaseUrl}</Text>
+              </div>
+              <Divider />
+              <Flex wrap gap={8}>
+                <Button icon={icon(<Save size={16} />)} loading={busy === 'save-gemini'} disabled={geminiLocked} onClick={() => runAction('save-gemini', '保存 Gemini API 配置', saveConfig)}>
+                  保存
+                </Button>
+                <Button
+                  type="primary"
+                  icon={icon(<Play size={16} />)}
+                  loading={busy === 'gemini-start'}
+                  disabled={isBusy || geminiRunning || !config.geminiApiKey.trim()}
+                  onClick={() =>
+                    runAction('gemini-start', '启动 Gemini API 网关', async () => {
+                      await saveConfig();
+                      await invoke('start_gemini_api');
+                    })
+                  }
+                >
+                  启动
+                </Button>
+                <Button danger icon={icon(<CircleStop size={16} />)} loading={busy === 'gemini-stop'} disabled={isBusy || !geminiRunning} onClick={() => runAction('gemini-stop', '停止 Gemini API 网关', () => invoke('stop_gemini_api'))}>
+                  停止
+                </Button>
+                <Button
+                  icon={icon(<ClipboardCheck size={16} />)}
+                  loading={busy === 'gemini-test'}
+                  disabled={isBusy || !geminiRunning}
+                  onClick={() =>
+                    runAction('gemini-test', '测试 Gemini API 网关', async () => {
+                      const result = await invoke('test_gemini_api');
+                      setGeminiTest(result.output || '');
+                      if (!result.ok) message.warning('Gemini 返回了错误，请查看测试结果');
+                    })
+                  }
+                >
+                  测试
+                </Button>
+              </Flex>
+            </Form>
+          </Card>
+        </Col>
+        <Col xs={24} lg={10}>
+          <Card className="section-card" title="客户端接入">
+            <div className="client-snippet">
+              <Text type="secondary">OpenAI SDK 兼容模式</Text>
+              <pre>{`base_url = "${geminiBaseUrl}"
+api_key = "任意非空字符串"
+model = "gemini-3.5-flash"`}</pre>
+            </div>
+            <Divider />
+            <Text type="secondary">测试结果</Text>
+            <pre className="test-output">{geminiTest || '暂无'}</pre>
+          </Card>
+        </Col>
+      </Row>
+    </div>
+  );
+
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -640,6 +773,7 @@ export default function App() {
         items={[
           { key: 'control', label: '控制台', children: controlTab },
           { key: 'monitor', label: '流量监控', children: monitorTab },
+          { key: 'gemini', label: 'Gemini API', children: geminiTab },
           { key: 'apps', label: '应用代理', children: appsTab },
         ]}
       />

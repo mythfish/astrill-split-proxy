@@ -12,6 +12,12 @@
   "default_route": "direct",
   "auto_system_proxy": false,
   "shell_proxy_target": "split_proxy",
+  "gemini": {
+    "host": "127.0.0.1",
+    "port": 18082,
+    "api_key": "",
+    "upstream": "split_proxy"
+  },
   "rules": {
     "direct": [
       "localhost",
