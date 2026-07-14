@@ -53,7 +53,7 @@ const initialConfig = {
   shellProxyTarget: 'split_proxy',
   geminiPort: 18082,
   geminiApiKey: '',
-  geminiUpstream: 'split_proxy',
+  geminiUpstream: 'astrill',
   geminiProxyUrl: '',
   proxyRules: '',
   directRules: '',
@@ -71,7 +71,7 @@ const shellTargetOptions = [
 
 const geminiUpstreamOptions = [
   { label: 'SplitProxy', value: 'split_proxy' },
-  { label: 'Astrill', value: 'astrill' },
+  { label: 'Astrill (Auto)', value: 'astrill' },
   { label: 'Custom', value: 'custom' },
   { label: 'Direct', value: 'direct' },
 ];
@@ -165,7 +165,7 @@ export default function App() {
       shellProxyTarget: raw.shell_proxy_target === 'astrill' ? 'astrill' : 'split_proxy',
       geminiPort: raw.gemini?.port ?? 18082,
       geminiApiKey: raw.gemini?.api_key ?? '',
-      geminiUpstream: ['split_proxy', 'astrill', 'custom', 'direct'].includes(raw.gemini?.upstream) ? raw.gemini.upstream : 'split_proxy',
+      geminiUpstream: ['split_proxy', 'astrill', 'custom', 'direct'].includes(raw.gemini?.upstream) ? raw.gemini.upstream : 'astrill',
       geminiProxyUrl: raw.gemini?.proxy_url ?? '',
       proxyRules: (raw.rules?.proxy ?? []).join('\n'),
       directRules: (raw.rules?.direct ?? []).join('\n'),

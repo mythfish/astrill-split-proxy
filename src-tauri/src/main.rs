@@ -539,6 +539,56 @@ fn detect_astrill_port_sync() -> Result<Option<u16>, String> {
     Ok(None)
 }
 
+fn prepare_astrill_openweb_config(app: &AppHandle) -> Result<Option<u16>, String> {
+    let Some(port) = detect_astrill_port_sync()? else {
+        return Ok(None);
+    };
+
+    let mut config = read_config_value(app)?;
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| "configuration root must be an object".to_string())?;
+    let upstream = root
+        .entry("upstream")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "upstream configuration must be an object".to_string())?;
+    let port_changed = upstream.get("port").and_then(Value::as_u64) != Some(port as u64);
+    if port_changed {
+        upstream.insert("host".into(), Value::String("127.0.0.1".into()));
+        upstream.insert("port".into(), json!(port));
+    }
+
+    let gemini = root
+        .entry("gemini")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "Gemini configuration must be an object".to_string())?;
+    let migrated = gemini
+        .get("openweb_default_migrated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let configured_upstream = gemini.get("upstream").and_then(Value::as_str);
+    let missing_upstream = configured_upstream.is_none();
+    let legacy_split_proxy_default = configured_upstream == Some("split_proxy");
+    if missing_upstream || (!migrated && legacy_split_proxy_default) {
+        // Older versions defaulted to SplitProxy. Promote that one-time default once OpenWeb is available.
+        gemini.insert("upstream".into(), Value::String("astrill".into()));
+    }
+    if !migrated || missing_upstream {
+        gemini.insert("openweb_default_migrated".into(), Value::Bool(true));
+    }
+
+    if port_changed || !migrated || missing_upstream {
+        fs::write(
+            config_path()?,
+            serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(Some(port))
+}
+
 fn shell_paths() -> Result<Vec<(String, PathBuf)>, String> {
     let home = dirs::home_dir().ok_or_else(|| "home directory not found".to_string())?;
     Ok(vec![
@@ -660,6 +710,10 @@ fn apply_system_proxy(service: &str, http_port: u16, socks_port: u16, enabled: b
 
 #[tauri::command]
 async fn load_config(app: AppHandle) -> Result<Value, String> {
+    let app_clone = app.clone();
+    let _ =
+        tauri::async_runtime::spawn_blocking(move || prepare_astrill_openweb_config(&app_clone))
+            .await;
     read_config_value(&app)
 }
 
@@ -702,6 +756,10 @@ async fn save_config(app: AppHandle, req: SaveRequest) -> Result<(), String> {
                     .to_string()
             }),
             "upstream": gemini_upstream,
+            "openweb_default_migrated": old_gemini
+                .get("openweb_default_migrated")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
             "proxy_url": req.gemini_proxy_url.unwrap_or_else(|| {
                 old_gemini
                     .get("proxy_url")
@@ -863,6 +921,11 @@ async fn stop_proxy(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(
 
 #[tauri::command]
 async fn start_gemini_api(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let app_clone = app.clone();
+    let detected_port =
+        tauri::async_runtime::spawn_blocking(move || prepare_astrill_openweb_config(&app_clone))
+            .await
+            .map_err(|e| e.to_string())??;
     let config = read_config_value(&app)?;
     let gemini = config.get("gemini").cloned().unwrap_or_else(|| json!({}));
     let api_key = gemini
@@ -872,6 +935,10 @@ async fn start_gemini_api(app: AppHandle, state: State<'_, Arc<AppState>>) -> Re
         .trim();
     if api_key.is_empty() {
         return Err("请先配置 Gemini API Key".into());
+    }
+    if gemini.get("upstream").and_then(Value::as_str) == Some("astrill") && detected_port.is_none()
+    {
+        return Err("未检测到 Astrill OpenWeb。请先启动 Astrill 并打开 OpenWeb 模式。".into());
     }
     let port = gemini_port_from_config(&config);
     let mut guard = state.gemini.lock().map_err(|e| e.to_string())?;

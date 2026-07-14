@@ -100,7 +100,7 @@ Default local endpoint:
 http://127.0.0.1:18082/v1
 ```
 
-Configure your Google Gemini API key in the app, choose an outbound path (`SplitProxy`, `Astrill`, `Custom`, or `Direct`), then start the gateway. `Custom` accepts an HTTP/HTTPS proxy URL such as `http://127.0.0.1:7890`.
+Configure your Google Gemini API key in the app, choose an outbound path (`Astrill`, `SplitProxy`, `Custom`, or `Direct`), then start the gateway. By default the app detects Astrill OpenWeb when it opens and again before the Gemini gateway starts, then sends Gemini traffic directly through the detected OpenWeb address. `Custom` accepts an HTTP/HTTPS proxy URL such as `http://127.0.0.1:7890`.
 
 ```text
 base_url = "http://127.0.0.1:18082/v1"
