@@ -54,6 +54,7 @@ const initialConfig = {
   geminiPort: 18082,
   geminiApiKey: '',
   geminiUpstream: 'split_proxy',
+  geminiProxyUrl: '',
   proxyRules: '',
   directRules: '',
 };
@@ -71,6 +72,7 @@ const shellTargetOptions = [
 const geminiUpstreamOptions = [
   { label: 'SplitProxy', value: 'split_proxy' },
   { label: 'Astrill', value: 'astrill' },
+  { label: 'Custom', value: 'custom' },
   { label: 'Direct', value: 'direct' },
 ];
 
@@ -163,7 +165,8 @@ export default function App() {
       shellProxyTarget: raw.shell_proxy_target === 'astrill' ? 'astrill' : 'split_proxy',
       geminiPort: raw.gemini?.port ?? 18082,
       geminiApiKey: raw.gemini?.api_key ?? '',
-      geminiUpstream: ['split_proxy', 'astrill', 'direct'].includes(raw.gemini?.upstream) ? raw.gemini.upstream : 'split_proxy',
+      geminiUpstream: ['split_proxy', 'astrill', 'custom', 'direct'].includes(raw.gemini?.upstream) ? raw.gemini.upstream : 'split_proxy',
+      geminiProxyUrl: raw.gemini?.proxy_url ?? '',
       proxyRules: (raw.rules?.proxy ?? []).join('\n'),
       directRules: (raw.rules?.direct ?? []).join('\n'),
     });
@@ -200,6 +203,7 @@ export default function App() {
         gemini_port: Number(config.geminiPort),
         gemini_api_key: config.geminiApiKey,
         gemini_upstream: config.geminiUpstream,
+        gemini_proxy_url: config.geminiProxyUrl,
         proxy_rules: lines(config.proxyRules),
         direct_rules: lines(config.directRules),
       },
@@ -679,6 +683,17 @@ export default function App() {
                   </Form.Item>
                 </Col>
               </Row>
+              {config.geminiUpstream === 'custom' ? (
+                <Form.Item label="代理地址">
+                  <Input
+                    value={config.geminiProxyUrl}
+                    disabled={geminiLocked}
+                    placeholder="http://127.0.0.1:7890"
+                    spellCheck={false}
+                    onChange={(event) => setConfig((old) => ({ ...old, geminiProxyUrl: event.target.value }))}
+                  />
+                </Form.Item>
+              ) : null}
               <Form.Item label="Gemini API Key">
                 <Input.Password
                   value={config.geminiApiKey}
@@ -702,7 +717,7 @@ export default function App() {
                   type="primary"
                   icon={icon(<Play size={16} />)}
                   loading={busy === 'gemini-start'}
-                  disabled={isBusy || geminiRunning || !config.geminiApiKey.trim()}
+                  disabled={isBusy || geminiRunning || !config.geminiApiKey.trim() || (config.geminiUpstream === 'custom' && !config.geminiProxyUrl.trim())}
                   onClick={() =>
                     runAction('gemini-start', '启动 Gemini API 网关', async () => {
                       await saveConfig();

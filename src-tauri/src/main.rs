@@ -50,6 +50,7 @@ struct SaveRequest {
     gemini_port: Option<u16>,
     gemini_api_key: Option<String>,
     gemini_upstream: Option<String>,
+    gemini_proxy_url: Option<String>,
     proxy_rules: Vec<String>,
     direct_rules: Vec<String>,
 }
@@ -673,6 +674,7 @@ async fn save_config(app: AppHandle, req: SaveRequest) -> Result<(), String> {
     let gemini_upstream = match req.gemini_upstream.as_deref() {
         Some("direct") => "direct",
         Some("astrill") => "astrill",
+        Some("custom") => "custom",
         _ => "split_proxy",
     };
     let config = json!({
@@ -699,7 +701,14 @@ async fn save_config(app: AppHandle, req: SaveRequest) -> Result<(), String> {
                     .unwrap_or("")
                     .to_string()
             }),
-            "upstream": gemini_upstream
+            "upstream": gemini_upstream,
+            "proxy_url": req.gemini_proxy_url.unwrap_or_else(|| {
+                old_gemini
+                    .get("proxy_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            })
         },
         "rules": {
             "proxy": req.proxy_rules,

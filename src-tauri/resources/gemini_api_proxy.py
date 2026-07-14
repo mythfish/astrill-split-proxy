@@ -45,15 +45,30 @@ def gemini_config(raw: dict[str, Any]) -> dict[str, Any]:
         "port": int(gemini.get("port", 18082)),
         "api_key": str(gemini.get("api_key", "")),
         "upstream": str(gemini.get("upstream", "split_proxy")),
+        "proxy_url": str(gemini.get("proxy_url", "")),
     }
 
 
-def proxy_url_for(raw: dict[str, Any], upstream: str) -> str | None:
+def normalize_proxy_url(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        return f"http://{value}"
+    return value
+
+
+def proxy_url_for(raw: dict[str, Any], upstream: str, custom_proxy_url: str) -> str | None:
     if upstream == "direct":
         return None
     if upstream == "astrill":
         port = int((raw.get("upstream") or {}).get("port", 32768))
         return f"http://127.0.0.1:{port}"
+    if upstream == "custom":
+        proxy_url = normalize_proxy_url(custom_proxy_url)
+        if not proxy_url:
+            raise ValueError("custom proxy URL is empty")
+        return proxy_url
     listen = raw.get("listen") or {}
     port = int(listen.get("http_port", 18080))
     return f"http://127.0.0.1:{port}"
@@ -197,13 +212,14 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     raw = load_raw_config(args.config)
     config = gemini_config(raw)
-    proxy_url = proxy_url_for(raw, config["upstream"])
+    proxy_url = proxy_url_for(raw, config["upstream"], config["proxy_url"])
     server = GeminiGatewayServer((config["host"], config["port"]), config["api_key"], proxy_url)
     logging.info(
-        "Gemini API gateway listening on %s:%s upstream=%s",
+        "Gemini API gateway listening on %s:%s upstream=%s proxy=%s",
         config["host"],
         config["port"],
         config["upstream"],
+        proxy_url or "direct",
     )
     try:
         server.serve_forever()
